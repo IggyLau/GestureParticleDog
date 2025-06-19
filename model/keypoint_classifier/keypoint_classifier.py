@@ -16,6 +16,7 @@ class KeyPointClassifier(object):
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
         self.output_details = self.interpreter.get_output_details()
+        self.last_confidence = 0.0  # Store confidence from last prediction
 
     def __call__(
         self,
@@ -32,5 +33,15 @@ class KeyPointClassifier(object):
         result = self.interpreter.get_tensor(output_details_tensor_index)
 
         result_index = np.argmax(np.squeeze(result))
-
+        self.last_confidence = np.max(np.squeeze(result))  # Store confidence
+        
+        if self.last_confidence < 0.7:
+            return 0
+        
         return result_index
+    
+    def get_confidence(self):
+        """Get the confidence from the last prediction"""
+        return self.last_confidence
+
+    

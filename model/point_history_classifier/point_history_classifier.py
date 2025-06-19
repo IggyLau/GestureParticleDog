@@ -21,6 +21,16 @@ class PointHistoryClassifier(object):
 
         self.score_th = score_th
         self.invalid_value = invalid_value
+        
+        # Class-specific thresholds - higher for clockwise/counter-clockwise
+        self.class_thresholds = {
+            0: 0.3,  # Stop - lower threshold (easier to detect)
+            1: 0.8,  # Clockwise - higher threshold (harder to detect)
+            2: 0.8,  # Counter-clockwise - higher threshold (harder to detect)
+            3: 0.6,
+            4: 0.6,
+            5: 0.6   # Move - medium threshold
+        }
 
     def __call__(
         self,

@@ -61,7 +61,7 @@ def main():
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
         static_image_mode=use_static_image_mode,
-        max_num_hands=1,
+        max_num_hands=2,
         min_detection_confidence=min_detection_confidence,
         min_tracking_confidence=min_tracking_confidence,
     )
@@ -141,6 +141,7 @@ def main():
 
                 # Hand sign classification
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                confidence = keypoint_classifier.get_confidence()  # Get confidence from last prediction
                 if hand_sign_id == 2:  # Point gesture
                     point_history.append(landmark_list[8])
                 else:
@@ -167,6 +168,7 @@ def main():
                     handedness,
                     keypoint_classifier_labels[hand_sign_id],
                     point_history_classifier_labels[most_common_fg_id[0][0]],
+                    confidence,
                 )
         else:
             point_history.append([0, 0])
@@ -492,7 +494,7 @@ def draw_bounding_rect(use_brect, image, brect):
 
 
 def draw_info_text(image, brect, handedness, hand_sign_text,
-                   finger_gesture_text):
+                   finger_gesture_text, confidence):
     cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[1] - 22),
                  (0, 0, 0), -1)
 
@@ -508,6 +510,26 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
         cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
                    cv.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2,
                    cv.LINE_AA)
+
+    # Display confidence with color coding
+    confidence_text = f"Confidence: {confidence:.2f}"
+    
+    # Color coding based on confidence level
+    if confidence >= 0.8:
+        color = (0, 255, 0)  # Green for high confidence
+        status = "HIGH"
+    elif confidence >= 0.6:
+        color = (0, 255, 255)  # Yellow for medium confidence
+        status = "MEDIUM"
+    else:
+        color = (0, 0, 255)  # Red for low confidence
+        status = "LOW"
+    
+    # Draw confidence text with color
+    cv.putText(image, f"{confidence_text} ({status})", (10, 120),
+               cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 3, cv.LINE_AA)
+    cv.putText(image, f"{confidence_text} ({status})", (10, 120),
+               cv.FONT_HERSHEY_SIMPLEX, 0.8, color, 2, cv.LINE_AA)
 
     return image
 
