@@ -21,6 +21,8 @@ class PointHistoryClassifier(object):
 
         self.score_th = score_th
         self.invalid_value = invalid_value
+        self.last_confidence = 0.0  # Store confidence from last prediction
+        self.last_threshold = 0.0   # Store threshold used for last prediction
         
         # Class-specific thresholds - higher for clockwise/counter-clockwise
         self.class_thresholds = {
@@ -47,8 +49,22 @@ class PointHistoryClassifier(object):
         result = self.interpreter.get_tensor(output_details_tensor_index)
 
         result_index = np.argmax(np.squeeze(result))
+        self.last_confidence = float(np.squeeze(result)[result_index])  # Store confidence
 
-        if np.squeeze(result)[result_index] < self.score_th:
+        # Use class-specific thresholds instead of global threshold
+        class_threshold = self.class_thresholds.get(result_index, self.score_th)
+        
+        if self.last_confidence < class_threshold:
             result_index = self.invalid_value
 
+        self.last_threshold = class_threshold  # Store the threshold used for the last prediction
+
         return result_index
+
+    def get_confidence(self):
+        """Get the confidence score from the last prediction"""
+        return self.last_confidence
+
+    def get_last_threshold(self):
+        """Get the threshold used for the last prediction"""
+        return self.last_threshold
