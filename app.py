@@ -10,12 +10,23 @@ from collections import deque
 import cv2 as cv
 import numpy as np
 import mediapipe as mp
+from deepface import DeepFace
 
 from utils import CvFpsCalc
 from model import KeyPointClassifier
 from model import PointHistoryClassifier
 
 import requests
+
+
+def upload_fist_status(fist_closed):
+    """Upload fist status to server."""
+    try:
+        response = requests.post("http://127.0.0.1:50007/upload_fist", 
+                               json={"fist_closed": fist_closed})
+        return response.status_code == 200
+    except:
+        return False
 
 
 def get_args():
@@ -58,6 +69,16 @@ def main():
 
     use_brect = True
 
+    # DeepFace Configuration - Adjust these settings for better performance
+    DEEPFACE_CONFIG = {
+        'detector_backend': 'mediapipe',  # Options: 'opencv', 'mediapipe', 'mtcnn', 'retinaface'
+        'align': True,                    # Face alignment for better accuracy
+        'expand_percentage': 20,          # Expand face region (0-50)
+        'silent': True,                   # Reduce console output
+        'sensitivity_threshold': 0.3,     # Minimum confidence for emotion detection
+        'debug_low_confidence': True      # Print emotions when confidence < 0.5
+    }
+
     # Camera preparation ###############################################################
     cap = cv.VideoCapture(cap_device)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
@@ -67,10 +88,20 @@ def main():
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
         static_image_mode=use_static_image_mode,
-        max_num_hands=1,
+        max_num_hands=2,
         min_detection_confidence=min_detection_confidence,
         min_tracking_confidence=min_tracking_confidence,
     )
+
+    mp_face_detection= mp.solutions.face_detection
+    face_detection= mp_face_detection.FaceDetection(
+        model_selection=0,
+        min_detection_confidence=0.5
+    )
+
+    # Initialize DeepFace emotion detector
+    # DeepFace is a module, not a class - we use its functions directly
+    # No initialization needed for DeepFace
 
     keypoint_classifier = KeyPointClassifier()
 
@@ -98,14 +129,22 @@ def main():
     history_length = 16
     point_history = deque(maxlen=history_length)
 
+    finger_history = deque(maxlen=16)
     # Finger gesture history ################################################
-    finger_gesture_history = deque(maxlen=history_length)
-
+    finger_gesture_history = deque(maxlen=24)
+    # Emotion history #######################################################
+    emotion_history = deque(maxlen=24)
+    emotion_strength_history = deque(maxlen=24)
+    
+    # Frame counter for upload control
+    frame_counter = 0
+    upload_interval = 16  # Upload every 16 frames
+    last_uploaded_data = None
     #  ########################################################################
     mode = 0
-
     while True:
         fps = cvFpsCalc.get()
+        frame_counter += 1  # Increment frame counter
 
         # Process Key (ESC: end) #################################################
         key = cv.waitKey(10)
@@ -126,6 +165,23 @@ def main():
         image.flags.writeable = False
         results = hands.process(image)
         image.flags.writeable = True
+
+        # Face detection implementation #############################################################
+        image.flags.writeable = False
+        face_results = face_detection.process(image)
+        image.flags.writeable = True
+
+        # Variables to store hand data for upload
+        
+        upload_data = None
+        left_hand_closed = False
+        right_hand_detected = False  # Track if right hand was processed
+        
+        # Variables to store face and emotion data
+        face_detected = False
+        detected_emotion = "neutral"
+        emotion_confidence = 0.0
+        
 
         #  ####################################################################
         if results.multi_hand_landmarks is not None:
@@ -155,15 +211,28 @@ def main():
                 hand_confidence = (
                     keypoint_classifier.get_confidence()
                 )  # Get confidence from hand gesture
-                match hand_sign_id:
-                    case 2:
-                        point_history.append(landmark_list[8])
-                    case 0:
-                        point_history.append(landmark_list[12])
-                    case 4:
-                        point_history.append(landmark_list[4])
-                    case _:
-                        point_history.append([0, 0])
+                
+                # Check if left hand is in closed formation
+                if handedness.classification[0].label == "Left" and hand_sign_id == 1:  # 1 = "Close"
+                    left_hand_closed = True
+                    upload_fist_status(True)
+                elif handedness.classification[0].label == "Left":
+                    left_hand_closed = False
+                    upload_fist_status(False)
+                
+                # Only record point history from the right hand to avoid interference
+                if handedness.classification[0].label == "Right":
+                    right_hand_detected = True
+                    match hand_sign_id:
+                        case 2:
+                            point_history.append(landmark_list[8])
+                        case 0:
+                            point_history.append(landmark_list[12])
+                        case 4:
+                            point_history.append(landmark_list[4])
+                        case _:
+                            point_history.append([0, 0])
+                # Don't record point history from left hand to avoid noise
 
                 # Finger gesture classification
                 finger_gesture_id = 0
@@ -179,8 +248,17 @@ def main():
 
                 # Calculates the gesture IDs in the latest detection
                 finger_gesture_history.append(finger_gesture_id)
+                finger_history.append(hand_sign_id)
+                
                 most_common_fg_id = Counter(finger_gesture_history).most_common()
+                fg_adjusted = most_common_fg_id[0][0]
 
+                
+                if most_common_fg_id[0][0] == 0 and most_common_fg_id[0][1] != len(finger_gesture_history):
+                    fg_adjusted=most_common_fg_id[1][0]
+                    
+                else:
+                    fg_adjusted=most_common_fg_id[0][0]
                 # Drawing part
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
@@ -189,28 +267,145 @@ def main():
                     brect,
                     handedness,
                     keypoint_classifier_labels[hand_sign_id],
-                    point_history_classifier_labels[most_common_fg_id[0][0]],
+                    point_history_classifier_labels[fg_adjusted],
                     hand_confidence,
                     finger_confidence,
+                    last_uploaded_data,
                 )
-                server_url = "http://127.0.0.1:50007"
-
-                data={"keypoint": keypoint_classifier_labels[hand_sign_id],
-                      "point_history": point_history_classifier_labels[most_common_fg_id[0][0]]}
                 
-            # Will this crash if I don't have a finger sequence? Will it crash if null? 
-            # How can I instaitate null if cannot handle such things
-            response = requests.post(f"{server_url}/upload_Fingersequence", json=data)
-            if response.status_code == 200:
-                print(f"\n✓ Uploaded action with full emotion vector to server!")
-            else:
-                print(f"\n✗ Failed to upload. Status code: {response.status_code}")
-            
+                # Store data for right hand
+                if handedness.classification[0].label == "Right":
+                    # Use the most common emotion in the recent history
+                    if len(emotion_history) > 0:
+                        most_common_emotion = Counter(emotion_history).most_common(1)[0][0]
+                        # Get strengths for frames where this emotion was detected
+                        strengths = [strength for emo, strength in zip(emotion_history, emotion_strength_history) if emo == most_common_emotion]
+                        if strengths:
+                            avg_strength = sum(strengths) / len(strengths)
+                        else:
+                            avg_strength = 0.0
+                    else:
+                        most_common_emotion = detected_emotion
+                        avg_strength = emotion_confidence
+
+                    upload_data = {
+                        "keypoint": str(keypoint_classifier_labels[hand_sign_id]),
+                        "point_history": str(point_history_classifier_labels[fg_adjusted]),
+                        "emotion": most_common_emotion,
+                        "emotion_strength": float(avg_strength),
+                        "face_detected": bool(face_detected)
+                    }
+                
         else:
+            # Only append [0, 0] when no hands are detected at all
             point_history.append([0, 0])
+        
+        # If no right hand was detected in this frame, append [0, 0] to maintain history
+        if not right_hand_detected and results.multi_hand_landmarks is not None:
+            point_history.append([0, 0])
+
+        # Face processing #############################################################
+        if face_results.detections:
+            face_detected = True
+            # Process the first detected face (you can extend to multiple faces)
+            detection = face_results.detections[0]
+            
+            # Get face bounding box
+            bboxC = detection.location_data.relative_bounding_box
+            ih, iw, _ = debug_image.shape
+            bbox = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
+                   int(bboxC.width * iw), int(bboxC.height * ih)
+            
+            # Extract face region for emotion classification
+            x, y, w, h = bbox
+            if x >= 0 and y >= 0 and x + w <= iw and y + h <= ih:
+                face_region = debug_image[y:y+h, x:x+w]
+                
+                # Run emotion classification on face region with improved settings
+                try:
+                    # Enhanced DeepFace configuration for better sensitivity
+                    emotion_result = DeepFace.analyze(
+                        img_path=face_region,
+                        actions=['emotion'],
+                        enforce_detection=False,
+                        detector_backend=DEEPFACE_CONFIG['detector_backend'],
+                        align=DEEPFACE_CONFIG['align'],
+                        expand_percentage=DEEPFACE_CONFIG['expand_percentage'],
+                        silent=DEEPFACE_CONFIG['silent']
+                    )
+                    
+                    if emotion_result and len(emotion_result) > 0:
+                        # Get the dominant emotion
+                        result = emotion_result[0]
+                        all_emotions = result['emotion']
+                        detected_emotion = result['dominant_emotion']
+                        emotion_confidence = all_emotions[detected_emotion]
+                        
+                        # Enhanced sensitivity control
+                        sensitivity_threshold = DEEPFACE_CONFIG['sensitivity_threshold']
+                        
+                        # Check if any emotion is above threshold
+                        high_confidence_emotions = {k: v for k, v in all_emotions.items() if v > sensitivity_threshold}
+                        
+                        if high_confidence_emotions:
+                            # Use the highest confidence emotion above threshold
+                            detected_emotion = max(high_confidence_emotions, key=high_confidence_emotions.get)
+                            emotion_confidence = high_confidence_emotions[detected_emotion]
+                        else:
+                            # If no emotion is above threshold, use neutral
+                            detected_emotion = "neutral"
+                            emotion_confidence = all_emotions["neutral"]
+                        
+                        # Debug output for low confidence
+                        if DEEPFACE_CONFIG['debug_low_confidence'] and emotion_confidence < 0.5:
+                            print(f"Low confidence emotions: {all_emotions}")
+                            print(f"Selected: {detected_emotion} ({emotion_confidence:.3f})")
+                    
+                except Exception as e:
+                    # Fallback if emotion detection fails
+                    detected_emotion = "neutral"
+                    emotion_confidence = 0.0
+                    print(f"Emotion detection error: {e}")
+        else:
+            face_detected = False
+            detected_emotion = "neutral"
+            emotion_confidence = 0.0
+        
+        # Update emotion history
+        emotion_history.append(detected_emotion)
+        emotion_strength_history.append(emotion_confidence)
+
+        # Upload logic with conditions
+        should_upload = True
+        
+        # Condition 1: Upload every 16 frames
+        
+            
+        
+        # Condition 2: Upload when left hand is closed (alternative condition)
+        # if left_hand_closed:
+        #     should_upload = True
+        # else: 
+        #     should_upload = False
+        
+        # Perform upload if conditions are met
+        if should_upload and upload_data is not None and frame_counter % upload_interval == 0:
+            server_url = "http://127.0.0.1:50007"
+            try:
+                response = requests.post(f"{server_url}/upload_Fingersequence", json=upload_data)
+                if response.status_code == 200:
+                    last_uploaded_data = upload_data
+                    print(f"✓ Uploaded action to server! Frame: {frame_counter}"+ str(upload_data))
+                else:
+                    print(f"✗ Failed to upload. Status code: {response.status_code}")
+            except requests.exceptions.RequestException as e:
+                print(f"✗ Network error during upload: {e}")
 
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
+        
+        # Draw face detection and emotion information
+        debug_image = draw_face_info(debug_image, face_detected, detected_emotion, emotion_confidence)
 
         # Screen reflection #############################################################
         cv.imshow("Hand Gesture Recognition", debug_image)
@@ -623,6 +818,7 @@ def draw_info_text(
     finger_gesture_text,
     hand_confidence,
     finger_confidence,
+    last_uploaded_data,
 ):
     cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[1] - 22), (0, 0, 0), -1)
 
@@ -639,6 +835,19 @@ def draw_info_text(
         1,
         cv.LINE_AA,
     )
+
+    if last_uploaded_data is not None:
+        uploaded_text= last_uploaded_data["keypoint"] + " " + last_uploaded_data["point_history"]
+        cv.putText(
+           image,
+           uploaded_text,
+           (10, 200),
+           cv.FONT_HERSHEY_SIMPLEX,
+           0.8,
+           (0, 255, 0),
+           2,
+           cv.LINE_AA,
+        )
 
     if finger_gesture_text != "":
         cv.putText(
@@ -780,6 +989,72 @@ def draw_info(image, fps, mode, number):
                 1,
                 cv.LINE_AA,
             )
+    return image
+
+
+def draw_face_info(image, face_detected, detected_emotion, emotion_confidence):
+    if face_detected:
+        cv.putText(
+            image,
+            "Face Detected: Yes",
+            (10, 200),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv.LINE_AA,
+        )
+        cv.putText(
+            image,
+            "Emotion: " + detected_emotion,
+            (10, 230),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv.LINE_AA,
+        )
+        cv.putText(
+            image,
+            "Emotion Confidence: {:.2f}".format(emotion_confidence),
+            (10, 260),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
+            2,
+            cv.LINE_AA,
+        )
+    else:
+        cv.putText(
+            image,
+            "Face Detected: No",
+            (10, 200),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+            cv.LINE_AA,
+        )
+        cv.putText(
+            image,
+            "Emotion: Neutral",
+            (10, 230),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+            cv.LINE_AA,
+        )
+        cv.putText(
+            image,
+            "Emotion Confidence: 0.00",
+            (10, 260),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+            cv.LINE_AA,
+        )
     return image
 
 
