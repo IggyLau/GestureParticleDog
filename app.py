@@ -138,7 +138,7 @@ def main():
     
     # Frame counter for upload control
     frame_counter = 0
-    upload_interval = 16  # Upload every 16 frames
+    upload_interval = 24  # Upload every 24 frames to match finger_gesture_history length
     last_uploaded_data = None
     #  ########################################################################
     mode = 0
